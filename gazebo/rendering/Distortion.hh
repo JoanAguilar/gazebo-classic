@@ -32,6 +32,9 @@ namespace gazebo
   {
     class DistortionPrivate;
 
+    // TODO: Write documentation.
+    enum DistortionMode{ForwardLegacy, Forward, OpenCV};
+
     /// \addtogroup gazebo_rendering Rendering
     /// \{
 
@@ -139,6 +142,12 @@ namespace gazebo
       /// cutting off black borders caused by distortion (only if the crop
       /// flag has been set).
       protected: void CalculateAndApplyDistortionScale();
+
+      // TODO: Write documentation.
+      protected: void PopulateDistortionMapForward(const double focalLength);
+
+      // TODO: Write documentation.
+      protected: void PopulateDistortionMapOpenCV(const double focalLength);
 
       /// \internal
       /// \brief Pointer to private data.

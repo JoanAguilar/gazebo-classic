@@ -1,7 +1,10 @@
 include (${gazebo_cmake_dir}/GazeboUtils.cmake)
 
+find_package(OpenCV REQUIRED)
+
 include_directories(SYSTEM
   ${OGRE_INCLUDE_DIRS}
+  ${OpenCV_INCLUDE_DIRS}
   ${TBB_INCLUDEDIR}
   skyx
   skyx/include
@@ -229,6 +232,7 @@ target_link_libraries(gazebo_rendering
   gazebo_msgs
   gazebo_transport
   ${ogre_libraries}
+  ${OpenCV_LIBS}
   ${OPENGL_LIBRARIES}
   ${tinyxml_LIBRARIES}
   ${IGNITION-TRANSPORT_LIBRARIES}

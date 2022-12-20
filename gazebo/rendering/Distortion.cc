@@ -14,6 +14,8 @@
  * limitations under the License.
  *
 */
+#include <opencv2/opencv.hpp>
+
 #include <sdf/sdf.hh>
 
 #include <ignition/math/Helpers.hh>
@@ -24,6 +26,7 @@
 
 using namespace gazebo;
 using namespace rendering;
+
 
 namespace gazebo
 {
@@ -60,13 +63,14 @@ namespace gazebo
       /// black pixels at the corners of the image.
       public: bool distortionCrop = true;
 
+      // TODO: Update documentation.
       /// \brief Use the legacy distortion mode. If this is set to false, the
       /// new mode modifies how Brown's distortion equations are applied to
       /// better reflect real distortion. The image is projected from image
       /// plane to camera plane to apply distortion equations, then projected
       /// back to image plane. Note that the new distortion doesn't allow
       /// the image to be cropped.
-      public: bool legacyMode = true;
+      public: DistortionMode distortionMode = ForwardLegacy;
 
       /// \brief Lens distortion compositor
       public: Ogre::CompositorInstance *lensDistortionInstance;
@@ -141,12 +145,16 @@ void Distortion::Load(sdf::ElementPtr _sdf)
   {
     this->dataPtr->compositorName = _sdf->Get<std::string>(compositorName);
   }
+  // TODO: Update this logic (and SDF) to allow using OpenCV.
   const std::string legacyMode = "ignition:legacy_mode";
-  if (_sdf->HasElement(legacyMode))
+  if (_sdf->HasElement(legacyMode) && _sdf->Get<bool>(legacyMode))
   {
-    this->dataPtr->legacyMode = _sdf->Get<bool>(legacyMode);
+    this->dataPtr->distortionMode = ForwardLegacy;
   }
-  if (!this->dataPtr->legacyMode && this->dataPtr->distortionCrop)
+  if (
+      this->dataPtr->distortionMode != ForwardLegacy &&
+      this->dataPtr->distortionCrop
+  )
   {
     gzwarn << "Enable legacy mode to use distortion cropping" << std::endl;
     this->dataPtr->distortionCrop = false;
@@ -197,13 +205,6 @@ void Distortion::SetCamera(CameraPtr _camera)
   this->dataPtr->distortionTexHeight = texSide;
   unsigned int imageSize =
       this->dataPtr->distortionTexWidth * this->dataPtr->distortionTexHeight;
-  double colStepSize = 1.0 / this->dataPtr->distortionTexWidth;
-  double rowStepSize = 1.0 / this->dataPtr->distortionTexHeight;
-
-  // Half step-size vector to add to the value being placed in distortion map.
-  // Necessary for compositor to correctly interpolate pixel values.
-  const auto halfTexelSize =
-      0.5 * ignition::math::Vector2d(rowStepSize, colStepSize);
 
   // initialize distortion map
   this->dataPtr->distortionMap.resize(imageSize);
@@ -212,102 +213,17 @@ void Distortion::SetCamera(CameraPtr _camera)
     this->dataPtr->distortionMap[i] = -1;
   }
 
-  ignition::math::Vector2d distortionCenterCoordinates(
-      this->dataPtr->lensCenter.X() * this->dataPtr->distortionTexWidth,
-      this->dataPtr->lensCenter.Y() * this->dataPtr->distortionTexWidth);
-
-  // declare variables before the loop
-  const auto unsetPixelVector =  ignition::math::Vector2d(-1, -1);
-  ignition::math::Vector2d normalizedLocation,
-      distortedLocation,
-      newDistortedCoordinates,
-      currDistortedCoordinates;
-  unsigned int distortedIdx,
-      distortedCol,
-      distortedRow;
-  double normalizedColLocation, normalizedRowLocation;
-
   // fill the distortion map
-  for (unsigned int mapRow = 0; mapRow < this->dataPtr->distortionTexHeight;
-    ++mapRow)
+  if (
+      this->dataPtr->distortionMode == ForwardLegacy ||
+      this->dataPtr->distortionMode == Forward
+  )
   {
-    normalizedRowLocation = mapRow*rowStepSize;
-    for (unsigned int mapCol = 0; mapCol < this->dataPtr->distortionTexWidth;
-      ++mapCol)
-    {
-      normalizedColLocation = mapCol*colStepSize;
-
-      normalizedLocation[0] = normalizedColLocation;
-      normalizedLocation[1] = normalizedRowLocation;
-
-      if (this->dataPtr->legacyMode)
-      {
-        distortedLocation = this->Distort(
-            normalizedLocation,
-            this->dataPtr->lensCenter,
-            this->dataPtr->k1, this->dataPtr->k2, this->dataPtr->k3,
-            this->dataPtr->p1, this->dataPtr->p2);
-      }
-      else
-      {
-        distortedLocation = this->Distort(
-            normalizedLocation,
-            this->dataPtr->lensCenter,
-            this->dataPtr->k1, this->dataPtr->k2, this->dataPtr->k3,
-            this->dataPtr->p1, this->dataPtr->p2,
-            this->dataPtr->distortionTexWidth,
-            focalLength);
-      }
-
-      // compute the index in the distortion map
-      distortedCol = round(distortedLocation.X() * 
-        this->dataPtr->distortionTexWidth);
-      distortedRow = round(distortedLocation.Y() *
-        this->dataPtr->distortionTexHeight);
-
-      // Note that the following makes sure that, for significant distortions,
-      // there is not a problem where the distorted image seems to fold over
-      // itself. This is accomplished by favoring pixels closer to the center
-      // of distortion, and this change applies to both the legacy and
-      // nonlegacy distortion modes.
-
-      // Make sure the distorted pixel is within the texture dimensions
-      if (distortedCol < this->dataPtr->distortionTexWidth &&
-          distortedRow < this->dataPtr->distortionTexHeight)
-      {
-        distortedIdx = distortedRow * this->dataPtr->distortionTexWidth +
-          distortedCol;
-
-        // check if the index has already been set
-        if (this->dataPtr->distortionMap[distortedIdx] != unsetPixelVector)
-        {
-          // grab current coordinates that map to this destination
-          currDistortedCoordinates =
-            this->dataPtr->distortionMap[distortedIdx] *
-            this->dataPtr->distortionTexWidth;
-
-          // grab new coordinates to map to
-          newDistortedCoordinates[0] = mapCol;
-          newDistortedCoordinates[1] = mapRow;
-
-          // use the new mapping if it is closer to the center of the distortion
-          if (newDistortedCoordinates.Distance(distortionCenterCoordinates) <
-              currDistortedCoordinates.Distance(distortionCenterCoordinates))
-          {
-            this->dataPtr->distortionMap[distortedIdx] = normalizedLocation +
-              halfTexelSize;
-          }
-        }
-        else
-        {
-          this->dataPtr->distortionMap[distortedIdx] = normalizedLocation +
-            halfTexelSize;
-        }
-      }
-      // else: mapping is outside of the image bounds.
-      // This is expected and normal to ensure
-      // no black borders; carry on
-    }
+    this->PopulateDistortionMapForward(focalLength);
+  }
+  else
+  {
+    this->PopulateDistortionMapOpenCV(focalLength);
   }
 
   // set up the distortion instance
@@ -562,11 +478,162 @@ ignition::math::Vector2d Distortion::Distort(
 void Distortion::SetCrop(const bool _crop)
 {
   // Only update the distortion scale if the crop value is going to flip.
-  if (this->dataPtr->distortionCrop != _crop && this->dataPtr->legacyMode)
+  if (
+      this->dataPtr->distortionCrop != _crop &&
+      this->dataPtr->distortionMode == ForwardLegacy
+  )
   {
     this->dataPtr->distortionCrop = _crop;
     this->CalculateAndApplyDistortionScale();
   }
+}
+
+//////////////////////////////////////////////////
+void Distortion::PopulateDistortionMapForward(const double focalLength)
+{
+  double colStepSize = 1.0 / this->dataPtr->distortionTexWidth;
+  double rowStepSize = 1.0 / this->dataPtr->distortionTexHeight;
+  ignition::math::Vector2d distortionCenterCoordinates(
+      this->dataPtr->lensCenter.X() * this->dataPtr->distortionTexWidth,
+      this->dataPtr->lensCenter.Y() * this->dataPtr->distortionTexWidth);
+
+  // Half step-size vector to add to the value being placed in distortion map.
+  // Necessary for compositor to correctly interpolate pixel values.
+  const auto halfTexelSize =
+      0.5 * ignition::math::Vector2d(rowStepSize, colStepSize);
+
+  // declare variables before the loop
+  const auto unsetPixelVector =  ignition::math::Vector2d(-1, -1);
+  ignition::math::Vector2d normalizedLocation,
+      distortedLocation,
+      newDistortedCoordinates,
+      currDistortedCoordinates;
+  unsigned int distortedIdx,
+      distortedCol,
+      distortedRow;
+  double normalizedColLocation, normalizedRowLocation;
+
+  // fill distortion map
+  for (unsigned int mapRow = 0; mapRow < this->dataPtr->distortionTexHeight;
+    ++mapRow)
+  {
+    normalizedRowLocation = mapRow*rowStepSize;
+    for (unsigned int mapCol = 0; mapCol < this->dataPtr->distortionTexWidth;
+      ++mapCol)
+    {
+      normalizedColLocation = mapCol*colStepSize;
+
+      normalizedLocation[0] = normalizedColLocation;
+      normalizedLocation[1] = normalizedRowLocation;
+
+      if (this->dataPtr->distortionMode == ForwardLegacy)
+      {
+        distortedLocation = this->Distort(
+            normalizedLocation,
+            this->dataPtr->lensCenter,
+            this->dataPtr->k1, this->dataPtr->k2, this->dataPtr->k3,
+            this->dataPtr->p1, this->dataPtr->p2);
+      }
+      else
+      {
+        // Per if statement check above, this can only be 'Forward'.
+        distortedLocation = this->Distort(
+            normalizedLocation,
+            this->dataPtr->lensCenter,
+            this->dataPtr->k1, this->dataPtr->k2, this->dataPtr->k3,
+            this->dataPtr->p1, this->dataPtr->p2,
+            this->dataPtr->distortionTexWidth,
+            focalLength);
+      }
+
+      // compute the index in the distortion map
+      distortedCol = round(distortedLocation.X() *
+        this->dataPtr->distortionTexWidth);
+      distortedRow = round(distortedLocation.Y() *
+        this->dataPtr->distortionTexHeight);
+
+      // Note that the following makes sure that, for significant distortions,
+      // there is not a problem where the distorted image seems to fold over
+      // itself. This is accomplished by favoring pixels closer to the center
+      // of distortion, and this change applies to both the legacy and
+      // nonlegacy distortion modes.
+
+      // Make sure the distorted pixel is within the texture dimensions
+      if (distortedCol < this->dataPtr->distortionTexWidth &&
+          distortedRow < this->dataPtr->distortionTexHeight)
+      {
+        distortedIdx = distortedRow * this->dataPtr->distortionTexWidth +
+          distortedCol;
+
+        // check if the index has already been set
+        if (this->dataPtr->distortionMap[distortedIdx] != unsetPixelVector)
+        {
+          // grab current coordinates that map to this destination
+          currDistortedCoordinates =
+            this->dataPtr->distortionMap[distortedIdx] *
+            this->dataPtr->distortionTexWidth;
+
+          // grab new coordinates to map to
+          newDistortedCoordinates[0] = mapCol;
+          newDistortedCoordinates[1] = mapRow;
+
+          // use the new mapping if it is closer to the center of the distortion
+          if (newDistortedCoordinates.Distance(distortionCenterCoordinates) <
+              currDistortedCoordinates.Distance(distortionCenterCoordinates))
+          {
+            this->dataPtr->distortionMap[distortedIdx] = normalizedLocation +
+              halfTexelSize;
+          }
+        }
+        else
+        {
+          this->dataPtr->distortionMap[distortedIdx] = normalizedLocation +
+            halfTexelSize;
+        }
+      }
+      // else: mapping is outside of the image bounds.
+      // This is expected and normal to ensure
+      // no black borders; carry on
+    }
+  }
+}
+
+//////////////////////////////////////////////////
+void Distortion::PopulateDistortionMapOpenCV(const double focalLength)
+{
+  std::cout << "Unimplemented." << std::endl;
+
+  // TODO: Translate to C++.
+  // camera_matrix = np.array([
+  //     [focal_length, 0, distortion_tex_width * lens_center[0]],
+  //     [0, focal_length, distortion_tex_height * lens_center[1]],
+  //     [0, 0, 1]
+  // ])
+  // dist_coeffs = np.array([k1, k2, p1, p2, k3])
+  // R = np.eye(3)
+  // new_camera_matrix = camera_matrix
+  // size = np.array([distortion_tex_width, distortion_tex_height])
+  // m1type = cv2.CV_32FC2
+  //
+  // # map1, _ = cv2.initUndistortRectifyMap(camera_matrix, dist_coeffs, R, new_camera_matrix, size, m1type)
+  // map1, _ = cv2.initInverseRectificationMap(camera_matrix, dist_coeffs, R, new_camera_matrix, size, m1type)
+  //
+  // map1[:, :, 0] /= distortion_tex_width
+  // map1[:, :, 1] /= distortion_tex_height
+  //
+  // distortion_map_raw = np.reshape(map1, (map1.shape[0] * map1.shape[1], 2))
+  //
+  // distortion_map = np.full(distortion_map_raw.shape, -1, dtype=np.float32)
+  // for i in range(distortion_map.shape[0]):
+  //     x, y = distortion_map_raw[i]
+  //     if 0 < x < 1 and 0 < y < 1:
+  //         distortion_map[i] = distortion_map_raw[i] + half_texel_size
+  // return distortion_map
+
+  // TODO? Handle "halo". OpenCV seems to leave pixels that "don't have a
+  // value" as undistorted, this results in a "halo" of undistorted pixels
+  // around the distorted ones. `PopulateDistortionMapForward` assigns a -1
+  // value to such pixels.
 }
 
 //////////////////////////////////////////////////
